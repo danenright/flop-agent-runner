@@ -97,6 +97,34 @@ class FakeGateway:
         raise AssertionError(f"unexpected request {method} {url}")
 
 
+class FakeParcel:
+    """Stands in for technocore-parcel's parcel.py module."""
+
+    MAX_EVENT_BODY_CHARS = 2800
+
+    class ParcelError(RuntimeError):
+        pass
+
+    def __init__(self, parcel: dict, claim_error: str | None = None):
+        self.parcel = parcel
+        self.claim_error = claim_error
+        self.claims: list[Path] = []
+        self.results: list[str] = []
+
+    def load_parcel(self, path: Path) -> dict:
+        return self.parcel
+
+    def claim_parcel(self, path: Path, identity: Path, label: str) -> dict:
+        if self.claim_error:
+            raise self.ParcelError(self.claim_error)
+        self.claims.append(path)
+        return {"worker_did": "did:key:z6Mk"}
+
+    def worker_event(self, path: Path, identity: Path, kind: str, body: str) -> dict:
+        self.results.append(body)
+        return {"verified_record": {"seq": 9}}
+
+
 class AgentTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()
@@ -133,8 +161,8 @@ class AddressTests(unittest.TestCase):
         key = Ed25519PrivateKey.generate()
         public_key = agent.raw_public_key(key)
         did = agent.did_for_public_key(public_key)
-        self.assertRegex(did, agent.parcel_module.DID_RE)
-        decoded = agent.parcel_module.base58_decode(did.removeprefix("did:key:z"))
+        self.assertRegex(did, agent.DID_RE)
+        decoded = agent.base58_decode(did.removeprefix("did:key:z"))
         self.assertEqual(decoded[2:], agent.ss58_public_key(agent.ss58_address(public_key)))
 
     def test_identity_file_format_is_checked(self) -> None:
@@ -331,21 +359,50 @@ class SpendTests(AgentTestCase):
             "events": [],
         }
         path = self.root / "parcel.json"
-        agent.parcel_module.write_private_json(path, private, replace=False)
+        agent.write_private_json(path, private)
         self.gateway.completion["choices"][0]["message"]["content"] = "x" * 5000
-        with (
-            mock.patch.object(agent.parcel_module, "claim_parcel") as claim,
-            mock.patch.object(
-                agent.parcel_module, "worker_event", return_value={"verified_record": {"seq": 9}}
-            ) as result,
-        ):
+        fake_parcel = FakeParcel(private)
+        with mock.patch.object(agent, "parcel_support", return_value=fake_parcel):
             entry = agent.run_task(ctx, self.backend(), agent.load_task(path))
-        claim.assert_called_once()
-        body = result.call_args.args[3]
-        self.assertLessEqual(len(body), agent.parcel_module.MAX_EVENT_BODY_CHARS)
+        self.assertEqual(len(fake_parcel.claims), 1)
+        body = fake_parcel.results[0]
+        self.assertLessEqual(len(body), fake_parcel.MAX_EVENT_BODY_CHARS)
         self.assertTrue(entry["reply_truncated"])
         self.assertEqual(entry["parcel_result_seq"], 9)
         self.assertNotIn(private["room"], ctx.ledger_path.read_text())
+
+
+class OptionalParcelTests(AgentTestCase):
+    def parcel_file(self) -> Path:
+        path = self.root / "parcel.json"
+        path.write_text(json.dumps({"parcel_version": 1, "task": {"title": "t", "instructions": "i"}}))
+        return path
+
+    def test_parcel_task_without_parcel_checkout_explains_how_to_enable_it(self) -> None:
+        with (
+            mock.patch.object(agent, "_parcel_module", None),
+            mock.patch.object(agent, "parcel_location", None),
+            mock.patch.dict(agent.os.environ, {}, clear=False),
+        ):
+            agent.os.environ.pop(agent.PARCEL_ENV, None)
+            with self.assertRaisesRegex(agent.AgentError, "--technocore-parcel"):
+                agent.load_task(self.parcel_file())
+
+    def test_parcel_errors_become_agent_errors_and_skip_lost_claims(self) -> None:
+        queue = self.root / "queue"
+        queue.mkdir()
+        (queue / "p.json").write_text(json.dumps({"parcel_version": 1}))
+        fake = FakeParcel({"task": {"title": "t", "instructions": "i"}}, claim_error="parcel already claimed by someone")
+        with mock.patch.object(agent, "parcel_support", return_value=fake):
+            summary = agent.run_cycle(self.context(), agent.GatewayBackend(512, 4.0, set()), queue, 1, 4.0, "none")
+        self.assertEqual(summary["failed"], 1)
+        self.assertTrue((queue / "skipped" / "p.json").exists())
+
+    def test_plain_prompt_tasks_never_load_parcel(self) -> None:
+        with mock.patch.object(agent, "parcel_support", side_effect=AssertionError("loaded")):
+            task_path = self.root / "t.json"
+            task_path.write_text(json.dumps({"title": "t", "prompt": "p"}))
+            self.assertEqual(agent.load_task(task_path)["kind"], "prompt")
 
 
 CHANNEL = "0x" + "dc" * 32
@@ -432,11 +489,67 @@ class SettlementTests(AgentTestCase):
         self.assertEqual(evidence["paid_by_this_account_flop"], 0.0)
         self.assertEqual(evidence["spends"][0]["onchain"]["payer"], BROKER)
 
+    def test_evidence_fills_metered_cost_from_an_older_receipt(self) -> None:
+        ctx = self.context()
+        receipt = {"channelId": CHANNEL, "aggregateGn": "390", "priceSnapshot": {"flopPerGn": "0.003"}}
+        agent.append_ledger(ctx, {"kind": "spend", "ok": True, "request_id": "gen-old", "receipt": receipt})
+        evidence = agent.export_evidence(ctx, self.root / "old-evidence.json")
+        self.assertEqual(evidence["metered_cost_flop"], 1.17)
+        self.assertEqual(evidence["spends"][0]["aggregate_gn"], 390)
+        self.assertEqual(evidence["paid_by_this_account_flop"], 0.0)
+
     def test_network_without_explorer_refuses_settlement_lookup(self) -> None:
         ctx = self.context()
         ctx.network = agent.Network("testnet", "https://f", "https://g", GENESIS)
         with self.assertRaisesRegex(agent.AgentError, "--explorer-url"):
             agent.explorer_get(ctx, "compute-channels/x")
+
+
+class CreditCheckTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.calls: list[str] = []
+
+    def fake_http(self, spend: dict, channels: list[dict]):
+        def handler(method, url, payload=None, bearer=None, timeout=60):
+            self.calls.append(url)
+            if url.endswith("/inference-spend"):
+                return 200, spend
+            if "/compute-channels?" in url:
+                return 200, {"data": channels}
+            if "/accounts/" in url:
+                return 200, {"balance": "25000000000000000000"}
+            raise AssertionError(url)
+
+        return handler
+
+    def test_did_resolves_to_its_own_account(self) -> None:
+        key = Ed25519PrivateKey.generate()
+        public_key = agent.raw_public_key(key)
+        did, address = agent.resolve_subject(agent.did_for_public_key(public_key))
+        self.assertEqual(address, agent.ss58_address(public_key))
+        self.assertIsNotNone(did)
+
+    def test_invalid_subject_is_refused(self) -> None:
+        with self.assertRaises(agent.AgentError):
+            agent.resolve_subject("not-an-account")
+
+    def test_account_with_no_settled_spend_gets_broker_explanation(self) -> None:
+        handler = self.fake_http({"totalSpentRaw": "0", "channelCount": 0, "settledChannels": 0}, [])
+        with mock.patch.object(agent, "http_json", handler):
+            report = agent.credit_report(DEVNET, ALICE)
+        self.assertEqual(report["credited_inference_spend_flop"], 0.0)
+        self.assertEqual(report["balance_flop"], 25.0)
+        self.assertIn("broker", report["verdict"])
+        self.assertTrue(any("agent=" + ALICE in url for url in self.calls))
+
+    def test_settled_channels_paid_by_account_are_listed(self) -> None:
+        spend = {"totalSpentRaw": "3136320000000000149", "channelCount": 1, "settledChannels": 1}
+        channels = [channel_body(ALICE), channel_body(BROKER)]
+        with mock.patch.object(agent, "http_json", self.fake_http(spend, channels)):
+            report = agent.credit_report(DEVNET, ALICE)
+        self.assertEqual(report["settled_channels"], 1)
+        self.assertEqual([item["miner_paid_flop"] for item in report["recent_channels"]], [3.13632])
+        self.assertIn("agent scoring", report["verdict"])
 
 
 class CliBackendTests(AgentTestCase):

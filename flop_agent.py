@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fund a Technocore DID on the FLOP network and spend it on real inference tasks."""
+"""Fund a Technocore DID on the FLOP network, spend it on real inference, and check what is credited."""
 
 from __future__ import annotations
 
@@ -23,16 +23,18 @@ from pathlib import Path
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-ROOT = Path(__file__).resolve().parent
-SPEC = importlib.util.spec_from_file_location("technocore_parcel", ROOT / "parcel.py")
-if not SPEC or not SPEC.loader:
-    raise RuntimeError("could not load parcel module")
-parcel_module = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(parcel_module)
-
-DEFAULT_IDENTITY = parcel_module.DEFAULT_IDENTITY
-DEFAULT_STATE_DIR = parcel_module.DEFAULT_PARCEL_DIR / "flop-agent"
-USER_AGENT = "technocore-parcel-flop-agent/0.1"
+BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+ED25519_MULTICODEC_PREFIX = b"\xed\x01"
+DID_RE = re.compile(r"^did:key:z6Mk[1-9A-HJ-NP-Za-km-z]{44}$")
+DEFAULT_IDENTITY = Path.home() / ".config" / "technocore" / "agent.env"
+LEGACY_STATE_DIR = Path.home() / ".local" / "state" / "technocore-parcel" / "flop-agent"
+DEFAULT_STATE_DIR = Path(
+    os.environ.get("FLOP_AGENT_STATE_DIR")
+    or (LEGACY_STATE_DIR if LEGACY_STATE_DIR.exists() else Path.home() / ".local" / "state" / "flop-agent-runner")
+)
+USER_AGENT = "flop-agent-runner/0.1"
+PARCEL_ENV = "TECHNOCORE_PARCEL"
+PARCEL_RESULT_MAX_CHARS = 2800
 SEED_RE = re.compile(r"^[0-9a-f]{64}$")
 GENESIS_RE = re.compile(r"^0x[0-9a-f]{64}$")
 NONCE_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -47,7 +49,7 @@ MAX_PROMPT_CHARS = 16_000
 TASK_SUFFIXES = (".json",)
 
 
-class AgentError(parcel_module.ParcelError):
+class AgentError(RuntimeError):
     pass
 
 
@@ -100,7 +102,7 @@ class AgentContext:
 
 
 def utc_now() -> str:
-    return parcel_module.utc_now()
+    return datetime.datetime.now(datetime.UTC).isoformat().replace("+00:00", "Z")
 
 
 def now_ms() -> int:
@@ -116,8 +118,18 @@ def base58_encode(value: bytes) -> str:
     encoded = ""
     while number:
         number, remainder = divmod(number, 58)
-        encoded = parcel_module.BASE58_ALPHABET[remainder] + encoded
+        encoded = BASE58_ALPHABET[remainder] + encoded
     return "1" * (len(value) - len(value.lstrip(b"\0"))) + encoded
+
+
+def base58_decode(value: str) -> bytes:
+    if not value or any(character not in BASE58_ALPHABET for character in value):
+        raise ValueError("invalid base58btc value")
+    number = 0
+    for character in value:
+        number = number * 58 + BASE58_ALPHABET.index(character)
+    decoded = number.to_bytes((number.bit_length() + 7) // 8, "big")
+    return b"\0" * (len(value) - len(value.lstrip("1"))) + decoded
 
 
 def ss58_checksum(body: bytes) -> bytes:
@@ -133,7 +145,7 @@ def ss58_address(public_key: bytes, prefix: int = SS58_PREFIX) -> str:
 
 def ss58_public_key(address: str) -> bytes:
     try:
-        raw = parcel_module.base58_decode(address)
+        raw = base58_decode(address)
     except ValueError as error:
         raise AgentError("address is not base58") from error
     if len(raw) != 35 or raw[0] >= 64:
@@ -159,7 +171,7 @@ def raw_public_key(key: Ed25519PrivateKey) -> bytes:
 
 
 def did_for_public_key(public_key: bytes) -> str:
-    return "did:key:z" + base58_encode(parcel_module.ED25519_MULTICODEC_PREFIX + public_key)
+    return "did:key:z" + base58_encode(ED25519_MULTICODEC_PREFIX + public_key)
 
 
 def http_json(
@@ -203,7 +215,13 @@ def error_text(status: int, body: dict) -> str:
 def write_private_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(path.parent, 0o700)
-    parcel_module.write_private_json(path, payload, replace=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+        json.dump(payload, stream, indent=2)
+        stream.write("\n")
+    os.chmod(temporary, 0o600)
+    temporary.replace(path)
 
 
 def load_ledger(path: Path) -> list[dict]:
@@ -610,6 +628,38 @@ class CliBackend:
         }
 
 
+_parcel_module = None
+parcel_location: Path | None = None
+
+
+def parcel_support():
+    """Load technocore-parcel's parcel.py on demand; Parcel tasks are optional."""
+    global _parcel_module
+    if _parcel_module is not None:
+        return _parcel_module
+    location = parcel_location or (Path(os.environ[PARCEL_ENV]) if os.environ.get(PARCEL_ENV) else None)
+    if location is None:
+        raise AgentError(
+            f"this task is a Technocore Parcel; pass --technocore-parcel or set {PARCEL_ENV} to a technocore-parcel checkout"
+        )
+    source = location.expanduser() / "parcel.py"
+    spec = importlib.util.spec_from_file_location("technocore_parcel", source)
+    if not source.is_file() or not spec or not spec.loader:
+        raise AgentError(f"no parcel.py in {location}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    _parcel_module = module
+    return module
+
+
+def parcel_call(name: str, *arguments):
+    module = parcel_support()
+    try:
+        return getattr(module, name)(*arguments)
+    except module.ParcelError as error:
+        raise AgentError(str(error)) from error
+
+
 def load_task(path: Path) -> dict:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -618,7 +668,7 @@ def load_task(path: Path) -> dict:
     if not isinstance(value, dict):
         raise AgentError(f"task {path.name} is not an object")
     if "parcel_version" in value:
-        parcel = parcel_module.load_parcel(path)
+        parcel = parcel_call("load_parcel", path)
         prompt = f"{parcel['task']['title']}\n\n{parcel['task']['instructions']}"
         return {"kind": "parcel", "path": path, "title": parcel["task"]["title"], "prompt": prompt}
     title, prompt = value.get("title"), value.get("prompt")
@@ -631,16 +681,17 @@ def run_task(ctx: AgentContext, backend, task: dict) -> dict:
     if len(task["prompt"]) > MAX_PROMPT_CHARS:
         raise AgentError(f"task prompt exceeds {MAX_PROMPT_CHARS} characters")
     if task["kind"] == "parcel":
-        parcel_module.claim_parcel(task["path"], ctx.identity, "flop-agent")
+        parcel_call("claim_parcel", task["path"], ctx.identity, "flop-agent")
     spent = backend.complete(ctx, task["prompt"])
     reply = spent.pop("reply")
     truncated = False
     if task["kind"] == "parcel":
         body = reply
-        if len(body) > parcel_module.MAX_EVENT_BODY_CHARS:
-            body = body[: parcel_module.MAX_EVENT_BODY_CHARS - 14] + "\n[truncated]"
+        limit = getattr(parcel_support(), "MAX_EVENT_BODY_CHARS", PARCEL_RESULT_MAX_CHARS)
+        if len(body) > limit:
+            body = body[: limit - 14] + "\n[truncated]"
             truncated = True
-        receipt = parcel_module.worker_event(task["path"], ctx.identity, "result", body)
+        receipt = parcel_call("worker_event", task["path"], ctx.identity, "result", body)
         spent["parcel_result_seq"] = receipt["verified_record"]["seq"]
     result_path = ctx.results_dir / f"{int(time.time())}-{sha256_text(task['prompt'])[:12]}.json"
     write_private_json(result_path, {"title": task["title"], "prompt": task["prompt"], "reply": reply, "spend": spent})
@@ -686,7 +737,7 @@ def run_cycle(ctx: AgentContext, backend, queue: Path, max_tasks: int, budget_fl
         try:
             task = load_task(path)
             entry = run_task(ctx, backend, task)
-        except parcel_module.ParcelError as error:
+        except AgentError as error:
             append_ledger(ctx, {"kind": "spend", "ok": False, "task_file": path.name, "error": str(error)[:400]})
             summary["failed"] += 1
             if "already claimed" in str(error):
@@ -699,7 +750,7 @@ def run_cycle(ctx: AgentContext, backend, queue: Path, max_tasks: int, budget_fl
     if ctx.network.explorer_url:
         try:
             summary["settlement"] = check_settlements(ctx)
-        except parcel_module.ParcelError as error:
+        except AgentError as error:
             summary["settlement_error"] = str(error)[:400]
     return summary
 
@@ -711,15 +762,19 @@ def raw_to_flop(value) -> float | None:
         return None
 
 
-def explorer_get(ctx: AgentContext, path: str) -> dict | None:
-    if not ctx.network.explorer_url:
-        raise AgentError(f"{ctx.network.name} has no explorer API; pass --explorer-url")
-    status, body = http_json("GET", f"{ctx.network.explorer_url}/{path}")
+def explorer_fetch(network: Network, path: str) -> dict | None:
+    if not network.explorer_url:
+        raise AgentError(f"{network.name} has no explorer API; pass --explorer-url")
+    status, body = http_json("GET", f"{network.explorer_url}/{path}")
     if status == 404:
         return None
     if status != 200:
         raise AgentError(f"explorer lookup failed: {error_text(status, body)}")
     return body
+
+
+def explorer_get(ctx: AgentContext, path: str) -> dict | None:
+    return explorer_fetch(ctx.network, path)
 
 
 def spend_channel(spend: dict) -> str | None:
@@ -792,13 +847,72 @@ def check_settlements(ctx: AgentContext) -> dict:
 
 
 def account_inference_spend(ctx: AgentContext) -> dict | None:
-    body = explorer_get(ctx, f"accounts/{ctx.address}/inference-spend")
+    return inference_spend_for(ctx.network, ctx.address)
+
+
+def inference_spend_for(network: Network, address: str) -> dict | None:
+    body = explorer_fetch(network, f"accounts/{address}/inference-spend")
     if body is None:
         return None
     return {
         "total_spent_flop": raw_to_flop(body.get("totalSpentRaw")),
         "channel_count": body.get("channelCount"),
         "settled_channels": body.get("settledChannels"),
+    }
+
+
+def resolve_subject(subject: str) -> tuple[str | None, str]:
+    """Map a did:key or SS58 address to (did, account address); the DID key is the account."""
+    if DID_RE.fullmatch(subject):
+        multikey = base58_decode(subject.removeprefix("did:key:z"))
+        if len(multikey) != 34 or not multikey.startswith(ED25519_MULTICODEC_PREFIX):
+            raise AgentError("DID is not an Ed25519 did:key")
+        return subject, ss58_address(multikey[2:])
+    ss58_public_key(subject)
+    return None, subject
+
+
+def credit_report(network: Network, subject: str, channel_limit: int = 20) -> dict:
+    """Key-free check of the settled inference spend that FLOP's chain attributes to an account."""
+    did, address = resolve_subject(subject)
+    spend = inference_spend_for(network, address) or {"total_spent_flop": 0.0, "channel_count": 0, "settled_channels": 0}
+    account = explorer_fetch(network, f"accounts/{address}") or {}
+    query = urllib.parse.urlencode({"agent": address, "limit": channel_limit, "offset": 0})
+    listing = explorer_fetch(network, f"compute-channels?{query}") or {}
+    channels = [
+        {
+            "channel": item.get("channelId"),
+            "status": item.get("status"),
+            "payment_status": item.get("paymentStatus"),
+            "miner": item.get("miner"),
+            "miner_paid_flop": raw_to_flop(item.get("minerPaid")),
+            "settlement_block": (item.get("settlement") or {}).get("blockNumber"),
+        }
+        for item in listing.get("data", [])
+        if isinstance(item, dict) and item.get("agent") == address
+    ]
+    settled = int(spend.get("settled_channels") or 0)
+    if settled:
+        verdict = (
+            f"{settled} settled compute channel(s) paid by this account, {spend['total_spent_flop']:g} FLOP in total. "
+            "This is the spend FLOP's agent scoring reads."
+        )
+    else:
+        verdict = (
+            "No settled compute channel is paid by this account. Spend through the FLOP gateway is paid by the "
+            "gateway's broker account and does not appear here."
+        )
+    return {
+        "network": network.name,
+        "explorer": network.explorer_url,
+        "did": did,
+        "address": address,
+        "balance_flop": raw_to_flop(account.get("balance")),
+        "credited_inference_spend_flop": spend.get("total_spent_flop"),
+        "channel_count": spend.get("channel_count"),
+        "settled_channels": settled,
+        "recent_channels": channels,
+        "verdict": verdict,
     }
 
 
@@ -823,6 +937,10 @@ def export_evidence(ctx: AgentContext, output: Path) -> dict:
         if entry.get("kind") != "spend" or not entry.get("ok"):
             continue
         item = {name: entry[name] for name in PUBLIC_SPEND_FIELDS if entry.get(name) is not None}
+        metered = receipt_cost(entry.get("receipt") if isinstance(entry.get("receipt"), dict) else None)
+        for name in ("cost_flop", "aggregate_gn"):
+            if item.get(name) is None and metered[name] is not None:
+                item[name] = metered[name]
         channel = spend_channel(entry)
         if channel:
             item.setdefault("channel", channel)
@@ -833,7 +951,7 @@ def export_evidence(ctx: AgentContext, output: Path) -> dict:
     final = [item["onchain"] for item in spends if item.get("onchain", {}).get("final")]
     try:
         chain_spend = account_inference_spend(ctx) if ctx.network.explorer_url else None
-    except parcel_module.ParcelError:
+    except AgentError:
         chain_spend = None
     funds = [
         {name: entry.get(name) for name in ("ts", "tier", "amount_flop", "tx_hash")}
@@ -853,7 +971,7 @@ def export_evidence(ctx: AgentContext, output: Path) -> dict:
         "settled_count": len(final),
         "settled_paid_flop": round(sum(float(item.get("miner_paid_flop") or 0) for item in final), 9),
         "paid_by_this_account_flop": round(
-            sum(float(item.get("miner_paid_flop") or 0) for item in final if item.get("payer_is_this_account")), 9
+            sum((float(item.get("miner_paid_flop") or 0) for item in final if item.get("payer_is_this_account")), 0.0), 9
         ),
         "chain_account_inference_spend": chain_spend,
         "spends": spends,
@@ -926,8 +1044,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--explorer-url", help="explorer API base used to confirm on-chain settlement")
     parser.add_argument("--address", help="SS58 account to fund instead of the DID-derived account")
     parser.add_argument("--accept-new-genesis", action="store_true")
+    parser.add_argument(
+        "--technocore-parcel", type=Path, help=f"technocore-parcel checkout for Parcel tasks; or set {PARCEL_ENV}"
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("address")
+    credit = subparsers.add_parser("credit", help="key-free check of an account's settled inference spend")
+    credit.add_argument("subject", help="did:key or SS58 address")
+    credit.add_argument("--limit", type=int, default=20, help="recent channels to list")
     subparsers.add_parser("status")
     fund_parser = subparsers.add_parser("fund")
     fund_parser.add_argument("--tier", choices=["quick", "linked"], default="quick")
@@ -968,8 +1092,18 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    global parcel_location
     args = build_parser().parse_args()
+    parcel_location = args.technocore_parcel
     try:
+        if args.command == "credit":
+            base = NETWORKS.get(args.network)
+            explorer = (args.explorer_url or (base.explorer_url if base else "") or "").rstrip("/")
+            if not explorer:
+                raise AgentError(f"{args.network} has no published explorer API yet; pass --explorer-url")
+            network = Network(args.network, "", "", None, explorer)
+            print(json.dumps(credit_report(network, args.subject, args.limit), indent=2))
+            return 0
         if args.command == "address":
             public_key = raw_public_key(load_signing_key(args.identity))
             print(f"did: {did_for_public_key(public_key)}")
@@ -1008,7 +1142,7 @@ def main() -> int:
             evidence = export_evidence(ctx, args.output)
             print(f"public evidence: {args.output} ({evidence['spend_count']} spends)")
         return 0
-    except (FileExistsError, OSError, parcel_module.ParcelError, ValueError, json.JSONDecodeError) as error:
+    except (FileExistsError, OSError, AgentError, ValueError, json.JSONDecodeError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
 
