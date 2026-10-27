@@ -1,0 +1,60 @@
+{
+  "evidence_version": 1,
+  "did": "did:key:z6MkrNkU2iHvF1YAM7JQxgzU8a8YgB6QGCCKBFzQbRmpZ1GM",
+  "address": "5G4yAhvQFhDnt5gtyLKEg2yLK7KWGghMByWw9zZvzBJvQcC4",
+  "network": "devnet",
+  "genesis": "0x99c172c095340ace980631f9123544c6bebd4839f3437e463533422d8be2d631",
+  "fund_count": 1,
+  "funds": [
+    {
+      "ts": "2026-10-26T23:51:42.836646Z",
+      "tier": "quick",
+      "amount_flop": 25,
+      "tx_hash": "0x186e41113fcb9f443b619d9065a05dc272a4e236c5ecdc158da0e1380c4b1292"
+    }
+  ],
+  "spend_count": 1,
+  "metered_cost_flop": 1.17,
+  "settled_count": 1,
+  "settled_paid_flop": 3.13632,
+  "paid_by_this_account_flop": 0.0,
+  "chain_account_inference_spend": {
+    "total_spent_flop": 0.0,
+    "channel_count": 0,
+    "settled_channels": 0
+  },
+  "spends": [
+    {
+      "ts": "2026-10-26T23:58:01.902104Z",
+      "network": "devnet",
+      "genesis": "0x99c172c095340ace980631f9123544c6bebd4839f3437e463533422d8be2d631",
+      "address": "5G4yAhvQFhDnt5gtyLKEg2yLK7KWGghMByWw9zZvzBJvQcC4",
+      "backend": "gateway",
+      "settlement": "brokered",
+      "model": "qwen/qwen2.5-0.5b-instruct",
+      "miner": "5HKiGNFSqSyEMVMjjr8JBKkkppytaqFZCRm27KGbCeHhUq92",
+      "request_id": "gen_bbcd0b79-68f7-4536-94a0-73969b8d087e",
+      "completion_tokens": 377,
+      "task_kind": "prompt",
+      "prompt_sha256": "b29c7262bbdf79b2c2cfce0a908ef28d2915d650f125dcb9eebbe432e090ce12",
+      "reply_sha256": "8c642afc6d68d20c661f878f33e7634006b127a16783c34da5a58ab5c247e7eb",
+      "cost_flop": 1.17,
+      "aggregate_gn": 390,
+      "channel": "0xdcad92337e1813ddcf0be9ef9dba60b8a3ed957516d8f30152a77b1ec6abe239",
+      "onchain": {
+        "status": "settled",
+        "payment_status": "PAID",
+        "final": true,
+        "payer": "5GsXb3TmNGixuEsbtixqHnqWr9UQJ2M8bkqBQWteNekgF98S",
+        "payer_is_this_account": false,
+        "escrow_flop": 3.168,
+        "miner_paid_flop": 3.13632,
+        "burned_flop": 0.0,
+        "cooperative": true,
+        "settlement_block": 2200785,
+        "settlement_extrinsic": "0xb31d00aa2e7330c2e6bbaf0bfc520a60a3f9e93980d8f5998b2a48c94e801645"
+      }
+    }
+  ],
+  "exported_at": "2026-10-27T00:33:25.479576Z"
+}

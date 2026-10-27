@@ -1,0 +1,4 @@
+{
+  "title": "Release review",
+  "prompt": "List three concrete risks of shipping a database schema migration on a Friday, each with one mitigation."
+}
