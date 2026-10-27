@@ -143,6 +143,15 @@ python3 -m pip install -r requirements.txt
 python3 -m unittest discover -s tests -v
 ```
 
+## Durable DID attribution
+
+[`ATTESTATION.json`](ATTESTATION.json) is a signature by `did:key:z6MkrNkU2iHvF1YAM7JQxgzU8a8YgB6QGCCKBFzQbRmpZ1GM` binding this repository to commit `0a1c880d5135d2a53f64a2b2e24b6a2a6658e9e9`. CI checks it with the onboarding repository's checksum-pinned verifier:
+
+```bash
+git clone https://github.com/danenright/technocore-contributor-onboarding
+python3 technocore-contributor-onboarding/verify_attestation.py ATTESTATION.json
+```
+
 ## History
 
 This runner started inside [`technocore-parcel`](https://github.com/danenright/technocore-parcel) and moved here with its commit history intact.

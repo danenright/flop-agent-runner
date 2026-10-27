@@ -1,0 +1,16 @@
+{
+  "attestation_version": 1,
+  "algorithm": "Ed25519",
+  "did": "did:key:z6MkrNkU2iHvF1YAM7JQxgzU8a8YgB6QGCCKBFzQbRmpZ1GM",
+  "domain": "@artifact",
+  "nonce": "1793061309124",
+  "repository": "https://github.com/danenright/flop-agent-runner",
+  "commit": "0a1c880d5135d2a53f64a2b2e24b6a2a6658e9e9",
+  "statement": "technocore-contribution-v1|https://github.com/danenright/flop-agent-runner|0a1c880d5135d2a53f64a2b2e24b6a2a6658e9e9",
+  "signature": "jkJKhWcEuLN0iMKeyU4a-zWrUlh4ZUuldbkUQPDBGgL2zQbp-AYdBbTgxBtzpMEsPacMbBjKLXM1EV2eiPyGCQ",
+  "signer_source": {
+    "commit": "8bd794b953d7b3fbcff71f4db2e3257f68d144c3",
+    "sha256": "667e3d6cf48301d1b43f44c9b328d73ec1dbf413ddc89fcb740baf86f6406c15",
+    "cryptography": "50.0.0"
+  }
+}
