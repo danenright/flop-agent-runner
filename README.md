@@ -82,6 +82,38 @@ python3 flop_agent.py --address <keystore-ss58> run --queue ~/flop-queue --backe
   --miner <independent-miner-ss58> --model qwen/qwen2.5-0.5b-instruct --exclude-miner <your-miner-ss58>
 ```
 
+## Direct-session crypto core
+
+[`flop_session.py`](flop_session.py) is the agent's side of a direct compute-channel session. It is an **independent implementation** of the FLOP Yellow Paper v0.5 (draft) wire formats, checked against FLOP's published vectors:
+
+| Piece | Spec | Checked against |
+|---|---|---|
+| F.0 codec: fixed integers, strict SCALE `Compact<u32>`, booleans; rejects truncation, overlong and trailing bytes | Appendix F.0 | every `codec` accept and reject vector |
+| `channel_id` v1 (binds genesis, agent, miner and nonce) and `decode_policy_hash` v1 | F.1 | `channel_id`, `wrong_genesis_network`, `wrong_session`, `decode_policy_v1` |
+| Transcript leaves V0 to V3, `h_ids`, Merkle accumulator and paths | F.3 | every `leaf_versions` preimage and hash, `h_ids_v1`, the Merkle root and the path for index 2 |
+| `VerifiedTurn` and `Vec<VerifiedTurn>` SCALE, FCC4 transcript containers with acks | F.3 | round trips of the published bytes; `unknown_leaf_enum`, `truncated_fcc4`, `trailing_fcc4`, `unknown_fcc_version`, `wrong_leaf_version`, `duplicate_turn_index`, `wrong_path_orientation`, `legacy_leaf_current_channel` |
+| Per-turn agent ack and agent receipt v1, **sr25519** (Substrate context) | F.0, F.3 | FLOP's miner-leaf, ack and receipt signatures; `invalid_agent_ack_signature`, `invalid_receipt_signature`, `legacy_receipt_current_channel` |
+| `AgentSession`: verify each miner turn (order, version cutoff, pinned decode policy, signature) before countersigning; checked `aggregate_gn`; final root; receipt signing; settle-bundle review | R12.1b, F.3 | an end-to-end session with fresh sr25519 keys |
+| Settlement arithmetic: cooperative settle, force-settle tariff `P = base_per_turn * n + rate_g * G`, `(1 - phi)(E - P)` refund, `TariffExceedsEscrow`, timeout refund | R12.1a, R12.1d | all five landed compute-channel `money-path-v1` fixtures, and the devnet channel in FINDINGS.md (miner paid escrow less floor(1%)) |
+
+The vectors are vendored unmodified in [`tests/vectors/`](tests/vectors/NOTICE.md) under CC BY 4.0, pinned by SHA-256.
+
+Settlement profiles:
+- `money-path-v1`: FLOP's fixtures.
+- `devnet-observed`: what devnet paid on 27 October.
+- `spec-v0.5`: the published 85/15 split with a 1% audit earmark. Rounding isn't specified, so its amounts are estimates.
+
+On devnet the penalty `phi(E - P)` is burned, as the fixtures show. The current yellowpaper text sends it to the FLOP Foundation account instead; this module reports the amount either way.
+
+The channel's `agent_key` is an sr25519 **session key**, separate from the Ed25519 DID account that funds the channel. Signing needs `pip install -r requirements-session.txt` (`py-sr25519-bindings`, Rust-backed). Everything else uses only the standard library.
+
+**Not covered yet:**
+- the on-chain calls (`force_open`, `force_settle`, `finalize`);
+- the miner's off-chain HTTP session protocol, which is not public;
+- DA, direct-rail and validator vectors (`unknown_retention_enum`, `invalid_validator_signature`).
+
+Those wait on FLOP publishing a miner route; see FINDINGS.md.
+
 ## Optional: Technocore Parcel tasks
 
 A queued file can also be a private [Technocore Parcel](https://github.com/danenright/technocore-parcel) capability file. The runner then:
@@ -139,8 +171,8 @@ It contains no bearer key, prompt or reply text.
 ## Develop
 
 ```bash
-python3 -m pip install -r requirements.txt
-python3 -m unittest discover -s tests -v
+python3 -m pip install -r requirements.txt -r requirements-session.txt
+python3 -m unittest discover -s tests -v   # sr25519 tests skip if requirements-session.txt is not installed
 ```
 
 ## Durable DID attribution
