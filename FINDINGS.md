@@ -2,6 +2,16 @@
 
 **Observed:** 27 October 2026 UTC, FLOP devnet (genesis `0x99c172c0…2d631`). Devnet earns nothing; this records how spend is attributed, not an allocation.
 
+## Prior report
+
+This independently reproduces [flop-labs/yellowpaper#172](https://github.com/flop-labs/yellowpaper/issues/172), opened by @thangvmt on 19 October 2026:
+
+- **Same broker:** that report found gateway channels opened by the same broker account, `5GsXb3Tm…F98S`.
+- **Community reading:** commenters there read the yellowpaper as crediting the account that signs `open_channel` / `force_open`.
+- **Self-funded sessions work:** a follow-up on 24 October showed a self-funded `force_open` channel settling cooperatively on devnet.
+
+As of this note, no FLOP maintainer has answered there.
+
 ## Why it matters
 
 FLOP's published agent airdrop rule is pro rata to **compute purchased in settled sessions**. The ratified yellowpaper decision D-0514 says agent scoring "MUST derive from settled compute-channel spend". So what matters is whose account opens and pays each compute channel.
